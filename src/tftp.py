@@ -2,7 +2,7 @@
 This module handles all TFTP related "stuff": data structures, packet 
 definitions, methods and protocol operations.
 
-(C) João Galamba, 2023
+(C) João Galamba, Jaime Ribalonga, Roberlane Oliveira, 2023
 """
 
 import ipaddress
@@ -14,6 +14,7 @@ from socket import (
     AF_INET, SOCK_DGRAM,
     herror,
     gaierror,
+    timeout,
     gethostbyaddr,
     gethostbyname_ex,
 )
@@ -29,6 +30,7 @@ MAX_BLOCK_NUMBER = 2**16 - 1  # 0..65535
 INACTIVITY_TIMEOUT = 25.0     # segs
 DEFAULT_MODE = 'octet'
 DEFAULT_BUFFER_SIZE = 8192    # bytes
+MAX_RETRIES = 15
 
 # TFTP message opcodes
 # RRQ, WRQ, DAT, ACK, ERR = range(1, 6)
@@ -129,8 +131,52 @@ def get_file(server_addr: INET4Address, filename: str):
     # [3] Isto quer dizer que recebemos um novo DAT
 #:
 
-def put_file():
+def put_file(server_addr: INET4Address, filename: str):
+    """
+    Put the local file given by `filename` to the remote server
+    at `server_addr` through a TFTP WRQ connection.
+    """
+    with socket(AF_INET, SOCK_DGRAM) as sock:
+        sock.settimeout(INACTIVITY_TIMEOUT)
+        with open(filename, 'rb') as file:
+            wrq = pack_wrq(filename)
+            next_block_number = 1
+            sock.sendto(wrq, server_addr)
+            while True:
+                ack_received = False
+                retries = 0
+                while not ack_received and retries < MAX_RETRIES:
+                    try:
+                        packet, server_addr = sock.recvfrom(DEFAULT_BUFFER_SIZE)
+                        opcode = unpack_opcode(packet)
+
+                        if opcode == ACK:
+                            block_number = unpack_ack(packet)
+                            if block_number == next_block_number - 1:
+                                ack_received = True
+                        elif opcode == ERR:
+                            error_code, error_msg = unpack_err(packet)
+                            raise Err(error_code, error_msg)
+                        else:
+                            raise ProtocolError(f'Invalid opcode: {opcode}')
+                    except timeout:
+                        retries += 1
+                        sock.sendto(wrq, server_addr)
+
+                if retries == MAX_RETRIES:
+                    raise ConnectionError('Connection timeout')
+
+                data = file.read(MAX_DATA_LEN)
+                if not data:
+                    break
+
+                dat = pack_dat(next_block_number, data)
+                sock.sendto(dat, server_addr)
+
+                next_block_number += 1
     pass
+    #:
+    
 #:
 
 ###############################################################
@@ -332,3 +378,4 @@ def is_ascii_printable(txt: str) -> bool:
     return set(txt).issubset(string.printable)
     # ALTERNATIVA: return not set(txt) - set(string.printable)
 #:
+
